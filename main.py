@@ -187,6 +187,30 @@ async def send_message(message: Message, user_message: str) -> None:
                 else:
                     await message.channel.send('Nie jestem połączony z żadnym kanałem głosowym.')
                 return
+            elif command == 'skip':
+                # Sprawdzenie, czy bot jest połączony z kanałem głosowym
+                if message.guild.voice_client:
+                    voice_client = message.guild.voice_client
+                    if voice_client.is_playing():
+                        voice_client.stop()  # Zatrzymanie aktualnego utworu
+                        if audio_queue:
+                            await message.channel.send('Pominięto utwór. Odtwarzam następny.')
+                            await play_audio_queue(voice_client)  # Odtwarzanie następnego utworu
+                            
+                        else:
+                            await message.channel.send('Pominięto utwór. Kolejka jest pusta.')
+                    else:
+                        await message.channel.send('Nie odtwarzam żadnego dźwięku.')
+                else:
+                    await message.channel.send('Nie jestem połączony z żadnym kanałem głosowym.')
+                return
+            elif command == 'list':
+                if audio_queue:
+                    queue_list = '\n'.join([f"{idx + 1}. {audio['path']}" for idx, audio in enumerate(audio_queue)])
+                    await message.channel.send(f'Aktualna kolejka:\n{queue_list}')
+                else:
+                    await message.channel.send('Kolejka jest pusta.')
+                return
             else:
                 response: str = 'Nie znam takiej komendy!'
                 await message.channel.send(response)
