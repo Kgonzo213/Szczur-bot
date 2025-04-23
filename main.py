@@ -4,12 +4,17 @@ from dotenv import load_dotenv
 from discord import Intents, Client, Message, User, FFmpegPCMAudio, PCMVolumeTransformer, AudioSource
 from responses import get_response
 import asyncio
+import yt_dlp  
+import re  
 
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))  # Ścieżka do folderu projektu
 
 # Ładowanie zmiennych środowiskowych z pliku .env
 load_dotenv()
 TOKEN: Final[str] = os.getenv('DISCORD_TOKEN')
+
+if not TOKEN:
+    raise ValueError("Brak tokena Discorda. Upewnij się, że plik .env zawiera DISCORD_TOKEN.")
 
 # Ustawienie bota
 intents: Intents = Intents.default()
@@ -19,20 +24,34 @@ client: Client = Client(intents=intents)
 # Globalna kolejka dla dźwięków
 audio_queue = []
 
-async def play_audio_queue(voice_client):
-    """Odtwarza dźwięki z kolejki w pętli."""
-    while audio_queue:
-        next_audio = audio_queue.pop(0)  # Pobierz pierwszy element z kolejki
-        audio_source = PCMVolumeTransformer(FFmpegPCMAudio(next_audio['path'], executable=next_audio['ffmpeg_path']))
-        
-        # Odtwarzanie dźwięku
-        voice_client.play(audio_source)
-        
-        # Czekaj, aż dźwięk się skończy
-        while voice_client.is_playing():
-            await asyncio.sleep(1)
 
-    # Jeśli kolejka jest pusta, rozłącz bota
+async def play_audio_queue(voice_client):
+    while audio_queue:
+        next_audio = audio_queue.pop(0)
+        ydl_opts = {
+            'format': 'bestaudio/best',
+            'quiet': True,
+            'noplaylist': True,
+            'extract_flat': False,
+        }
+        try:
+            with yt_dlp.YoutubeDL(ydl_opts) as ydl:
+                info = ydl.extract_info(next_audio['url'], download=False)
+                audio_url = info.get('url')
+                if not audio_url:
+                    raise Exception("Nie udało się uzyskać URL strumienia audio.")
+
+            audio_source = PCMVolumeTransformer(FFmpegPCMAudio(audio_url))
+            voice_client.play(audio_source)
+
+            while voice_client.is_playing():
+                await asyncio.sleep(1)
+
+        except Exception as e:
+            print(f'Błąd podczas odtwarzania: {e}')
+            await voice_client.disconnect()
+            return
+
     await voice_client.disconnect()
 
 # Obsługa wiadomości i komend
@@ -42,9 +61,38 @@ async def send_message(message: Message, user_message: str) -> None:
         return
     else:
         if user_message.startswith('?'):
-            command: str = user_message[1:].lower()
+            # Wyszukiwanie linku w wiadomości
+            link_match = re.search(r'http[s]?://\S+', user_message)
+            link = link_match.group(0) if link_match else ''  # Pobierz link, jeśli istnieje
+
+            # Usunięcie linku z wiadomości i konwersja komendy na małe litery
+            command_part = user_message[1:].replace(link, '').strip().lower()
+
+            # Połącz komendę i link (jeśli istnieje)
+            command = f"{command_part} {link}".strip()
+
             if command == 'help':
-                response: str = '?Szczur <nazwauzytkownika> <iloscszcuzrow> <co_ile_szczurzy> \n?chodz \n?graj <link>' 
+                response: str = (
+                    "**Lista dostępnych komend Szczur-bota:**\n\n"
+                    "**?szczur @użytkownik <ilość> <interwał>**\n"
+                    "   - Wysyła określoną liczbę szczurów do oznaczonego użytkownika w podanym interwale czasowym (w sekundach).\n"
+                    "   - Przykład: `?szczur @username 5 10` (wysyła 5 szczurów co 10 sekund).\n\n"
+                    "**?chodz**\n"
+                    "   - Bot dołącza do Twojego kanału głosowego i odtwarza dźwięk szczura.\n\n"
+                    "**?idz**\n"
+                    "   - Bot opuszcza kanał głosowy, na którym aktualnie się znajduje.\n\n"
+                    "**?graj <link lub fraza>**\n"
+                    "   - Odtwarza dźwięk z podanego linku YouTube lub wyszukuje i odtwarza pierwszy wynik dla podanej frazy.\n"
+                    "   - Przykład: `?graj https://www.youtube.com/watch?v=dQw4w9WgXcQ` lub `?graj Rick Astley Never Gonna Give You Up`.\n\n"
+                    "**?skip**\n"
+                    "   - Pomija aktualnie odtwarzany utwór i przechodzi do następnego w kolejce.\n"
+                    "   - Jeśli kolejka jest pusta, zatrzymuje odtwarzanie.\n\n"
+                    "**?list**\n"
+                    "   - Wyświetla aktualną kolejkę utworów do odtworzenia.\n\n"
+                    "**?help**\n"
+                    "   - Wyświetla tę wiadomość pomocy z opisem wszystkich dostępnych komend.\n\n"
+                    "Jeśli masz pytania lub potrzebujesz pomocy, skontaktuj się z administratorem bota!"
+                )
                 await message.channel.send(response)
                 return
             elif command[0:6] == 'szczur':
@@ -148,16 +196,35 @@ async def send_message(message: Message, user_message: str) -> None:
                         await message.channel.send('Jestem już połączony z innym kanałem głosowym!')
                         return
 
-                    # Ścieżki do FFmpeg i pliku audio
-                    ffmpeg_path = os.path.join(BASE_DIR, 'ffmpeg.exe')
-                    audio_path = command[5:]  # Link do pliku audio
-                    if not audio_path:
-                        await message.channel.send('Musisz podać link do pliku audio!')
+                    # Pobierz link lub frazę do wyszukiwania z komendy
+                    query = command[5:]
+                    if not query:
+                        await message.channel.send('Musisz podać link do filmu na YouTube lub frazę do wyszukania!')
                         return
 
-                    # Dodanie pliku audio do kolejki
-                    audio_queue.append({'path': audio_path, 'ffmpeg_path': ffmpeg_path})
-                    await message.channel.send(f'Dodano do kolejki: {audio_path}')
+                    # Sprawdzenie, czy podano bezpośredni link do YouTube
+                    if "youtube.com" in query or "youtu.be" in query:
+                        youtube_url = query
+                    else:
+                        # Wyszukiwanie na YouTube za pomocą yt-dlp
+                        ydl_opts = {
+                            'format': 'bestaudio/best',
+                            'quiet': True,
+                            'noplaylist': True,
+                            'extract_flat': True,
+                        }
+                        with yt_dlp.YoutubeDL(ydl_opts) as ydl:
+                            search_results = ydl.extract_info(f"ytsearch:{query}", download=False)
+                            if 'entries' in search_results and len(search_results['entries']) > 0:
+                                youtube_url = search_results['entries'][0]['url']
+                                await message.channel.send(f'Znaleziono: {search_results["entries"][0]["title"]}')
+                            else:
+                                await message.channel.send('Nie znaleziono wyników dla podanej frazy.')
+                                return
+
+                    # Dodanie linku do kolejki
+                    audio_queue.append({'url': youtube_url})
+                    await message.channel.send(f'Dodano do kolejki: {youtube_url}')
 
                     # Jeśli nic nie jest odtwarzane, rozpocznij odtwarzanie
                     if not voice_client.is_playing():
@@ -165,18 +232,6 @@ async def send_message(message: Message, user_message: str) -> None:
 
                 except Exception as e:
                     await message.channel.send(f'Wystąpił błąd: {e}')
-                return
-            elif command == 'stop':
-                # Sprawdzenie, czy bot jest połączony z kanałem głosowym
-                if message.guild.voice_client:
-                    voice_client = message.guild.voice_client
-                    if voice_client.is_playing():
-                        voice_client.stop()
-                        await message.channel.send('Odtwarzanie zostało zatrzymane.')
-                    else:
-                        await message.channel.send('Nie odtwarzam żadnego dźwięku.')
-                else:
-                    await message.channel.send('Nie jestem połączony z żadnym kanałem głosowym.')
                 return
             elif command == 'idz':
                 # Sprawdzenie, czy bot jest połączony z kanałem głosowym
@@ -188,7 +243,6 @@ async def send_message(message: Message, user_message: str) -> None:
                     await message.channel.send('Nie jestem połączony z żadnym kanałem głosowym.')
                 return
             elif command == 'skip':
-                # Sprawdzenie, czy bot jest połączony z kanałem głosowym
                 if message.guild.voice_client:
                     voice_client = message.guild.voice_client
                     if voice_client.is_playing():
@@ -196,7 +250,6 @@ async def send_message(message: Message, user_message: str) -> None:
                         if audio_queue:
                             await message.channel.send('Pominięto utwór. Odtwarzam następny.')
                             await play_audio_queue(voice_client)  # Odtwarzanie następnego utworu
-                            
                         else:
                             await message.channel.send('Pominięto utwór. Kolejka jest pusta.')
                     else:
@@ -206,7 +259,7 @@ async def send_message(message: Message, user_message: str) -> None:
                 return
             elif command == 'list':
                 if audio_queue:
-                    queue_list = '\n'.join([f"{idx + 1}. {audio['path']}" for idx, audio in enumerate(audio_queue)])
+                    queue_list = '\n'.join([f"{idx + 1}. {audio['url']}" for idx, audio in enumerate(audio_queue)])
                     await message.channel.send(f'Aktualna kolejka:\n{queue_list}')
                 else:
                     await message.channel.send('Kolejka jest pusta.')
